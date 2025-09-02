@@ -1,4 +1,4 @@
-from sibr_api import ApiBase
+from sibr_api import ApiBase,NotFoundError
 import os
 import json
 from aiohttp import BasicAuth
@@ -8,6 +8,7 @@ from typing import Literal
 import aiohttp
 import asyncio
 import inspect
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
@@ -107,8 +108,9 @@ class EninApi(ApiBase):
                     if col in df.columns:
                         df[col] = df[col].astype(str)
 
-                if if_exists == "merge":
-                    if key in ["company", 'accounts_type']:
+                if key in ["company", 'accounts_type']:
+                    df.drop_duplicates(subset=["org_nr"],inplace=True)
+                    if if_exists == "merge":
                         self.bq.to_bq(df=df,
                                       table_name=key,
                                       dataset_name="enin",
@@ -116,8 +118,16 @@ class EninApi(ApiBase):
                                       merge_on=["org_nr"],
                                       )
                     else:
-                        df = prepare_dataframe(df)
-                        self.logger.info(f'{len(df)} records after preparing {key}')
+                        self.bq.to_bq(df=df,
+                                      table_name=key,
+                                      dataset_name="enin",
+                                      if_exists="replace")
+                else:
+                    df = prepare_dataframe(df)
+                    df.drop_duplicates(subset= ["org_nr", "accounting_year"],inplace=True)
+                    self.logger.info(f'{len(df)} records after preparing {key}')
+
+                    if if_exists == "merge":
                         self.bq.to_bq(df=df,
                                       table_name=key,
                                       dataset_name="enin",
@@ -125,16 +135,7 @@ class EninApi(ApiBase):
                                       merge_on=["org_nr", "accounting_year"],
                                       # explicit_schema = {"inventory_change" : "FLOAT"}
                                       )
-                if if_exists == "replace":
-
-                    if key in ["company", 'accounts_type']:
-                        self.bq.to_bq(df=df,
-                                      table_name=key,
-                                      dataset_name="enin",
-                                      if_exists="replace")
                     else:
-                        df = prepare_dataframe(df)
-                        self.logger.info(f'{len(df)} records after preparing {key}')
                         self.bq.to_bq(df=df,
                                       table_name=key,
                                       dataset_name="enin",
@@ -160,7 +161,6 @@ class EninApi(ApiBase):
         for key, value in data.items():
             df = pd.DataFrame(value)
             output[key] = df
-
         return output
 
     def transform_single(self, output):
@@ -207,41 +207,26 @@ class BRREGapi(ApiBase):
         if not logger:
             logger = Logger('brregAPI','a')
         self.logger = logger
+        self.exceeds_limit = {}
         self.bq = BigQuery(logger = logger)
         self.logger.set_level('INFO')
 
 
-    # self.e
-    # def _ensure_fieldnames(self,df):
-    #     new_cols = []
-    #     for col in df.columns:
-    #         if col in new_cols:
-    #             self.logger.warning(f'Duplicate column found: {col}. Skipping adding')
-    #         else:
-    #             new_cols.append(col.replace('.', '_',))
-    #     df.columns = new_cols
-    # async def _ensure_session(self):
-    #     if self._session is None or self._session.closed:
-    #         self._session = aiohttp.ClientSession(headers=self._headers)
-    #     return self._session
-    # async def close(self):
-    #     if self._session and not self._session.closed:
-    #         await self._session.close()
-    # async def _reset_session(self):
-    #     if self._session:
-    #         await self._session.close()
-    #     self._session = None
-    #     return await self._ensure_session()
-
-    async def get_componay(self,orgnr : int | str):
+    async def get_company(self,orgnr : int | str):
         url = f"https://data.brreg.no/enhetsregisteret/api/enheter/{str(orgnr)}"
         headers = {
             'accept': 'application/json'
         }
-        response = await self.fetch_single(url = url,
-                                           headers = headers,
-                                           return_format='json')
-        return response
+        try:
+            response = await self.fetch_single(url = url,
+                                               headers = headers,
+                                               return_format='json')
+            return response
+
+        except NotFoundError:
+            self.logger.error(f'Item {orgnr} not found. Returning None')
+            return None
+
 
     async def get_financial(self,orgnr : int | str):
         url = f'https://data.brreg.no/regnskapsregisteret/regnskap/{str(orgnr)}'
@@ -249,43 +234,93 @@ class BRREGapi(ApiBase):
         headers = {
             'accept': 'application/json'
         }
-        response = await self.fetch_single(url=url,
-                                           headers=headers,
-                                           return_format='json')
-        return response
+        try:
+            response = await self.fetch_single(url=url,
+                                               headers=headers,
+                                               return_format='json')
+            return response
+        except NotFoundError:
+            self.logger.error(f'Item {orgnr} not found. Returning None')
+            return None
 
-    async def get_role(self,orgnr : int | str):
+    async def get_role(self,orgnr : int | str,timeout = 60):
         url = f'https://data.brreg.no/enhetsregisteret/api/enheter/{orgnr}/roller'
 
         headers = {
             'accept': 'application/json'
         }
-        response = await self.fetch_single(url=url,
-                                           headers=headers,
-                                           return_format='json')
-        return response
+        try:
+            response = await self.fetch_single(url=url,
+                                               headers=headers,
+                                               return_format='json',
+                                               timeout=timeout)
+            return response
+        except NotFoundError:
+            self.logger.error(f'Item {orgnr} not found. Returning None')
+            return None
 
-    async def get_page(self,page_num):
+
+
+    async def get_page_by_municipality(self,municipality_code):
+
         url = "https://data.brreg.no/enhetsregisteret/api/enheter"
 
-        params = {"page": page_num,
-                  "size": 2500,
+
+        params = {"page": 0,
+                  "size": 10000,
+                  "forretningsadresse.kommunenummer" : municipality_code,
                   }
         headers = {
             'accept': 'application/json'
         }
-
+        #self.logger.info(f'Getting companies from municipality {municipality_code}')
         response = await self.fetch_single(url = url, params = params, headers = headers)
-        return response
+        if response:
+            total_elements = response.get("page").get("totalElements")
+            self.logger.info(f'Getting data from municipality {municipality_code} with total elements: {total_elements}')
+            if total_elements>10000:
+                self.logger.warning(f'Total elements is {total_elements} for municipality {municipality_code}, which exceeds the limit.')
+                self.exceeds_limit[municipality_code] = total_elements
+                return None
+            else:
+                return response
+        else:
+            self.logger.warning(f'No data found for municipality {municipality_code}')
+
+    async def get_page_by_postal_code(self,postal_code):
+
+        url = "https://data.brreg.no/enhetsregisteret/api/enheter"
+
+        params = {"page": 0,
+                  "size": 10000,
+                  "forretningsadresse.postnummer" :postal_code,
+                  }
+        headers = {
+            'accept': 'application/json'
+        }
+        #self.logger.info(f'Getting companies from municipality {municipality_code}')
+        response = await self.fetch_single(url = url, params = params, headers = headers)
+        if response:
+            total_elements = response.get("page").get("totalElements")
+            self.logger.info(f'Getting data from municipality {postal_code} with total elements: {total_elements}')
+            if total_elements>10000:
+                self.logger.error(f'Total elements is {total_elements} for postal_code {postal_code}, which exceeds the limit.')
+                self.exceeds_limit[postal_code] = total_elements
+                return None
+            else:
+                return response
+        else:
+            self.logger.warning(f'No data found for municipality {postal_code}')
 
     def transform_pages(self,items):
 
         def transform_single(item):
-            data = (item.get("_embedded").get("enheter"))
+            data = item.get("_embedded",{}).get("enheter")
             if data:
                 self.ok_responses += 1
                 df = pd.json_normalize(data)
                 self._ensure_fieldnames(df)
+                df["fetch_date"] = pd.Timestamp.now()
                 return df
             else:
                 self.fail_responses += 1
@@ -299,274 +334,87 @@ class BRREGapi(ApiBase):
         def transform_roles_single(item) -> pd.DataFrame | None:
             orgnr, raw = item
             df = pd.DataFrame()
-            role_groups = raw.get('rollegrupper', [])
-            if role_groups:
-                self.ok_responses += 1
-                for group in role_groups:
-                    df1 = pd.json_normalize(group['roller'])
-                    df1['organisasjonsnummer'] = orgnr
-                    df = pd.concat([df, df1], ignore_index=True)
-                self._ensure_fieldnames(df)
-                return df
+            if raw:
+                role_groups = raw.get('rollegrupper', [])
+                if role_groups:
+                    self.ok_responses += 1
+                    for group in role_groups:
+                        df1 = pd.json_normalize(group['roller'])
+                        df1['organisasjonsnummer'] = orgnr
+                        df = pd.concat([df, df1], ignore_index=True)
+                    self._ensure_fieldnames(df)
+                    df["fetch_date"] = pd.Timestamp.now()
+                    return df
+                else:
+                    self.fail_responses += 1
+                    self.logger.warning(f'No role groups found for {orgnr}')
+                    return None
             else:
                 self.fail_responses += 1
-                self.logger.warning(f'No role groups found for {orgnr}')
+                self.logger.warning(f'No results from fetcher for {orgnr}')
                 return None
 
         results = [transform_roles_single(item) for item in items if item is not None]
         return pd.concat(results, ignore_index=True)
 
-    def save_merge(self,df : pd.DataFrame, table : str,dataset : str, merge_on: list):
-        df.dropna(subset=merge_on, inplace=True)
-        self.bq.to_bq(df, table, dataset, if_exists='merge', merge_on=merge_on)
+    def save_pages(self,df,if_exists : Literal["merge","append","replace"] = "merge"):
 
-    def save_bq(self,df,table,dataset, key_cols = None,if_exists = "append"):
-        df = df.dropna(subset=key_cols)
-        if df.empty:
-            self.logger.warning("DataFrame empty after removal of NaNs")
-            return df
+        exceeds_limit_file = "exceeds_limit.json"
+
+        # Bare utfør filoperasjoner hvis det faktisk er nye data å lagre
+        if self.exceeds_limit:
+            existing_data = {}
+            # 1. Prøv å lese eksisterende data fra filen
+            try:
+                with open(exceeds_limit_file, "r") as f:
+                    existing_data = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+
+            existing_data.update(self.exceeds_limit)
+
+            # 3. Skriv den fullstendige, oppdaterte dict-en tilbake til filen
+            with open(exceeds_limit_file, "w") as f:
+                # indent=4 gjør filen mer lesbar for mennesker
+                json.dump(existing_data, f, indent=4)
+
+                # 4. Tøm listen for neste kjøring
+            self.exceeds_limit.clear()
+
+        table = "companies"
+        dataset = "brreg"
+        merge_on = ["organisasjonsnummer"]
+        #self._ensure_fieldnames(df)
+        df.dropna(subset=merge_on, inplace=True)
+        trouble_cols = ["paategninger"]
+        for col in trouble_cols:
+            df[col] = df[col].astype(str)
+
+        not_found = ["underUtenlandskInsolvensbehandlingDato"]
+        for col in not_found:
+            if col not in df.columns:
+                df[col] = None
+        explicit_columns = {"aktivitet": ("STRING", "REPEATED"),
+                            #"paategninger": ("STRING", "REPEATED"),
+                            "postadresse_adresse": ("STRING", "REPEATED"),
+                            "forretningsadresse_adresse": ("STRING", "REPEATED"),
+                            "vedtektsfestetFormaal": ("STRING", "REPEATED"),
+                            "fetch_date": "DATETIME"
+                            }
+        if if_exists=="merge":
+            self.bq.to_bq(df, table, dataset, if_exists='merge', merge_on=merge_on,explicit_schema=explicit_columns)
+        else:
+            self.bq.to_bq(df, table, dataset, if_exists=if_exists,explicit_schema=explicit_columns)
+
+    def save_roles(self,df,if_exists : Literal["merge","append","replace"] = "append"):
+        table = "roles"
+        dataset = "brreg"
+        merge_on = ["organisasjonsnummer"]
+        df.dropna(subset=merge_on, inplace=True)
+        if if_exists == "merge":
+            self.bq.to_bq(df, table, dataset, if_exists='merge', merge_on=merge_on,explicit_schema={"fetch_date" : "DATETIME"})
         else:
             self.bq.to_bq(df, table, dataset, if_exists=if_exists)
-
-    # async def _request(self, url: str, params: dict = None) -> aiohttp.ClientResponse | None:
-    #     """
-    #     Utfører et nettverkskall og returnerer hele respons-objektet.
-    #     Håndterer kun generelle tilkoblingsfeil.
-    #     """
-    #     try:
-    #         session = await self._ensure_session()
-    #         return await session.get(url, headers=self._headers, params=params)
-    #     except Exception as e:
-    #         self.logger.error(f"Tilkoblingsfeil for URL {url}: {e}")
-    #         return None
-
-
-
-    # async def get_companies(self, org_nums: list,save_bq = False) -> pd.DataFrame|None:
-    #     data_frames = []
-    #     SAVE_INTERVAL = 5000
-    #     BATCH_SIZE = 200
-    #     base_url = "https://data.brreg.no/enhetsregisteret/api/enheter/"
-    #
-    #     async def fetch_single(orgnr):
-    #         response = await self._request(base_url + str(orgnr))
-    #         if not response:
-    #             return None
-    #
-    #         if response.status == 200:
-    #             data = await response.json()
-    #             return pd.json_normalize(data)
-    #         else:
-    #             error_text = await response.text()
-    #             self.logger.error(
-    #                 f'Error message - {inspect.currentframe().f_code.co_name}: orgnr {orgnr}, {response.status}, {error_text}')
-    #
-    #     for i in range(0, len(org_nums), BATCH_SIZE):
-    #         batch_orgs = org_nums[i:i + BATCH_SIZE]
-    #         tasks = [fetch_single(orgnr) for orgnr in batch_orgs]
-    #         self.logger.debug(f'Fetching batch: {batch_orgs[:10]}..Truncated')
-    #
-    #         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-    #
-    #         batch_results = [result for result in batch_results if result is not None and ((hasattr(result, 'empty') and not result.empty))]
-    #         data_frames.extend(batch_results)
-    #
-    #         if len(data_frames) >= SAVE_INTERVAL:
-    #             df = pd.concat(data_frames, ignore_index=True)
-    #             self._ensure_fieldnames(df)
-    #             df['country'] = 'NO'
-    #             df["fetch_date"] = pd.Timestamp.now()
-    #             if save_bq:
-    #                 self.save_bq(df,'organisasjonsnummer',table='companies',dataset='brreg')
-    #             data_frames = []
-    #
-    #         if save_bq and data_frames:
-    #             if len(data_frames)>1:
-    #                 df = pd.concat(data_frames, ignore_index=True)
-    #             elif len(data_frames)==1:
-    #                 df = data_frames[0]
-    #             else:
-    #                 raise ValueError("no data frames")
-    #             self._ensure_fieldnames(df)
-    #             df['country'] = 'NO'
-    #             df["fetch_date"] = pd.Timestamp.now()
-    #             if 'paategninger' in df.columns:
-    #                 df['paategninger'] = df['paategninger'].astype(str)
-    #             self.logger.info(f"Processed {len(data_frames)} organizations so far")
-    #             self.save_bq(df, 'organisasjonsnummer', table='company_data', dataset='brreg')
-
-
-
-
-    # async def get_financial_data(self, org_nums: list,save_bq=False) -> list[pd.DataFrame] | None:
-    #     saved_frames = []
-    #     data_frames = []
-    #
-    #     SAVE_INTERVAL = 5000
-    #     BATCH_SIZE = 200
-    #     count = 0
-    #     count_ok = 0
-    #     count_fail = 0
-    #     base_url = 'https://data.brreg.no/regnskapsregisteret/regnskap/'
-    #
-    #     async def fetch_single(orgnr) -> pd.DataFrame | None:
-    #         nonlocal count,count_ok,count_fail
-    #         count += 1
-    #
-    #         if count % 1000==0:
-    #             self.logger.info(f"Processed {count} organizations. {count_ok} OK, {count_fail} failed")
-    #     #
-    #         self.logger.debug(f"Henter data fra: {base_url + str(orgnr)}")
-    #
-    #         response = await self._request(base_url + str(orgnr))
-    #         if response is None:
-    #             return None
-    #
-    #         if response.status == 200:
-    #             count_ok += 1
-    #             data = await response.json()
-    #             if data and len(data) > 0:
-    #                 return pd.json_normalize(data[0])
-    #             else:
-    #                 self.logger.info(f'No data found for orgnr {orgnr}')
-    #                 self.logger.info(f'Data is empty: {data}')
-    #                 return None
-    #                 # return pd.DataFrame([{'virksomhet_organisasjonsnummer_empty': str(orgnr), }])
-    #         elif response.status == 404 and orgnr:
-    #             count_fail += 1
-    #             self.logger.debug(
-    #                 f'No data found for orgnr {orgnr} with status code {response.status}. Adding {orgnr} with no financial data')
-    #             return pd.DataFrame([{'virksomhet_organisasjonsnummer_empty': str(orgnr), }])
-    #
-    #         elif response.status == 500 and 'Regnskapet inneholder en oppstillingsplan som ikke er stottet' in response.text():
-    #             count_fail += 1
-    #             self.logger.debug(
-    #                 f'No data found for orgnr {orgnr} with status code {response.status}. Adding {orgnr} with no financial data')
-    #             return pd.DataFrame([{'virksomhet_organisasjonsnummer_empty': str(orgnr), }])
-    #         else:
-    #             error_text = await response.text()
-    #             self.logger.error(
-    #                 f'Could not get data for orgnr {orgnr}. Error: {response.status}, {error_text} | Function: {inspect.currentframe().f_code.co_name}')
-    #             return None
-    #
-    #         # try:
-    #         #     session = await self._ensure_session()
-    #         #     async with session.get(url, headers=self._headers) as response:
-    #         #         reponse_text = await response.text()
-    #         #
-    #         #
-    #         # except Exception as e:
-    #         #     tb = traceback.format_exc()  # Hent full stack trace
-    #         #     self.logger.error(f"Stack trace: {tb}")  # Logg stack trace
-    #         #     self.logger.error(f"Error processing orgnr {orgnr}: {e} | Function: {inspect.currentframe().f_code.co_name}")
-    #         #     return None
-    #
-    #     def prep_save(frames):
-    #         if not frames:
-    #             self.logger.info('No data frames to save')
-    #             return None
-    #
-    #         df_to_save = pd.concat(data_frames, ignore_index=True)
-    #         self._ensure_fieldnames(df_to_save)
-    #         df_to_save["fetch_date"] = pd.Timestamp.now()
-    #         if 'virksomhet_organisasjonsnummer_empty' in df_to_save.columns:
-    #             df_to_save['virksomhet_organisasjonsnummer'] = df_to_save['virksomhet_organisasjonsnummer_empty'].fillna(
-    #                 df_to_save['virksomhet_organisasjonsnummer'])
-    #             df_to_save.drop('virksomhet_organisasjonsnummer_empty', axis=1, inplace=True)
-    #         return df_to_save
-    #
-    #     for i in range(0, len(org_nums), BATCH_SIZE):
-    #         batch_orgs = org_nums[i:i + BATCH_SIZE]
-    #         batch_results = await asyncio.gather(*[fetch_single(orgnr) for orgnr in batch_orgs],return_exceptions=True)
-    #
-    #         batch_results = [result for result in batch_results if result is not None and ((hasattr(result, 'empty') and not result.empty))]
-    #         data_frames.extend(batch_results)
-    #         saved_frames.extend(batch_results)
-    #
-    #         if save_bq and count % SAVE_INTERVAL == 0:
-    #             data_frames = prep_save(data_frames)
-    #             self.save_bq(data_frames, 'virksomhet_organisasjonsnummer', table='financial', dataset='brreg')
-    #
-    #
-    #     if save_bq:
-    #         df = prep_save(data_frames)
-    #         self.save_bq(df, 'virksomhet_organisasjonsnummer', table='financial', dataset='brreg')
-    #     return prep_save(saved_frames)
-
-
-
-    # async def get_roles(self, org_nums: list,save_bq = False) -> pd.DataFrame|None:
-    #             dataframes = []
-    #             session = await self._ensure_session()
-    #             SAVE_INTERVAL = 2000
-    #             BATCH_SIZE = 200
-    #             count = 0
-    #             save_count = 0
-    #
-    #             async def fetch_single(orgnr):
-    #                 nonlocal count,save_count
-    #                 base = f'https://data.brreg.no/enhetsregisteret/api/enheter/{orgnr}/roller'
-    #                 response = await self._request(url = base)
-    #                 if response.status == 200:
-    #                     df = pd.DataFrame()
-    #                     res = await response.json()
-    #                     role_groups = res.get('rollegrupper', [])
-    #                     if role_groups:
-    #                         for group in role_groups:
-    #                             df1 = pd.json_normalize(group['roller'])
-    #                             df1['organisasjonsnummer'] = orgnr
-    #                             df = pd.concat([df, df1], ignore_index=True)
-    #                         count += 1
-    #                         save_count += 1
-    #                         self.logger.debug(
-    #                             f'Got {len(df)} roles for {orgnr}. Count {count} | save_count {save_count}')
-    #                         return df
-    #                     else:
-    #                         self.logger.error(f'No role groups found for {orgnr}')
-    #                 elif response.status == 404 and orgnr:
-    #                     count += 1
-    #                     save_count += 1
-    #                     self.logger.debug(
-    #                         f'No roles {orgnr}. Count {count} | save_count {save_count}. Saved to dataframe')
-    #                     return pd.DataFrame([{'organisasjonsnummer': str(orgnr), }])
-    #                 else:
-    #                     error_text = await response.text()
-    #                     self.logger.error(
-    #                         f'Error message - {inspect.currentframe().f_code.co_name}: orgnr {orgnr}, {response.status}, {error_text} | Count {count} | save_count {save_count}')
-    #
-    #
-    #             for i in range(0, len(org_nums), BATCH_SIZE):
-    #                 batch = org_nums[i:i + BATCH_SIZE]
-    #                 tasks = [fetch_single(orgnr) for orgnr in batch]
-    #
-    #                 res = await asyncio.gather(*tasks, return_exceptions=True)
-    #
-    #                 res = [result for result in res if result is not None and ((hasattr(result, 'empty') and not result.empty))]
-    #                 dataframes.extend(res)
-    #                 self.logger.debug(f'Fetched {len(res)}. Dataframes {len(dataframes)} Count: {count}')
-    #
-    #                 if count % 1000 == 0:
-    #                     self.logger.info(f"Processed {count} organizations | save_count {save_count} | dataframes: {len(dataframes)}")
-    #
-    #                 if save_count >= SAVE_INTERVAL and save_bq:
-    #                     if dataframes:
-    #                         df = pd.concat(dataframes, ignore_index=True)
-    #                         self._ensure_fieldnames(df)
-    #                         df['country'] = 'NO'
-    #                         if 'stadfestetFremtidsfullmakt' in df.columns:
-    #                             df['stadfestetFremtidsfullmakt'] = df['stadfestetFremtidsfullmakt'].astype(str)
-    #                         if 'begrensetRettsligHandleevne' in df.columns:
-    #                             df['begrensetRettsligHandleevne'] = df['begrensetRettsligHandleevne'].astype(str)
-    #                         self.save_bq(df,'organisasjonsnummer',table='roles',dataset='brreg')
-    #                         dataframes = []
-    #                         save_count = 0
-    #
-    #             if save_bq and dataframes:
-    #                 df = pd.concat(dataframes, ignore_index=True)
-    #                 self._ensure_fieldnames(df)
-    #                 df['country'] = 'NO'
-    #                 df["fetch_date"] = pd.Timestamp.now()
-    #                 self.save_bq(df,'organisasjonsnummer',table='roles',dataset='brreg')
 
     async def get_by_nace_geo(self,
                               nace_codes : list = None,
