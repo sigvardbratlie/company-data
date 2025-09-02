@@ -73,9 +73,15 @@ class EninApi(ApiBase):
 
     async def get_item(self, item):
         url = f'https://api.enin.ai/analysis/v1/company/NO{item}/accounts-composite?accounts_type_identifier=annual_company_accounts'
-        response = await self.fetch_single(url=url,
-                                           auth=self.auth, )
-        return response if response else []
+        try:
+            response = await self.fetch_single(url=url,
+                                               auth=self.auth,
+                                               timeout=90)
+            return response if response else []
+        except NotFoundError:
+            self.logger.error(f'Item {item} not found. Returning None')
+            return None
+
 
     def save_func(self, data: dict[str, pd.DataFrame], if_exists: str = "merge"):
 
