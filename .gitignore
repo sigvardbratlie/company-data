@@ -1,4 +1,6 @@
 .idea
 .venv
-.ven
+.env
 *.json
+/examples
+examples/
