@@ -44,20 +44,23 @@ if __name__ == "__main__":
                                                 transformer=brreg.transform_pages,
                                                 saver=brreg.save_pages,
                                                 concurrent_requests=15,
-                                                save_interval=100
+                                                save_interval=150
                                                 )
 
                     with open("exceeds_limit.json", "r") as f:
                         data = json.load(f)
-                    postnr = brreg.bq.read_bq(f"SELECT postnummer FROM brreg.geo_norge WHERE kommunenummer IN {tuple(data.keys())}")
-                    postnr_list = postnr.postnummer.tolist()
-                    await brreg.get_items(inputs=postnr_list,
-                                                fetcher=brreg.get_page_by_postal_code,
-                                                transformer=brreg.transform_pages,
-                                                saver=brreg.save_pages,
-                                                concurrent_requests=15,
-                                                save_interval=500
-                                                )
+                        if data:
+                            kommunenummer = data.get("kommunenummer",{})
+                    if kommunenummer:
+                        postnr = brreg.bq.read_bq(f"SELECT postnummer FROM brreg.geo_norge WHERE kommunenummer IN {tuple(kommunenummer.keys())}")
+                        postnr_list = postnr.postnummer.tolist()
+                        await brreg.get_items(inputs=postnr_list,
+                                                    fetcher=brreg.get_page_by_postal_code,
+                                                    transformer=brreg.transform_pages,
+                                                    saver=brreg.save_pages,
+                                                    concurrent_requests=15,
+                                                    save_interval=500
+                                                    )
                 elif args.org_nr:
                     await brreg.get_items(inputs=list(args.org_nr),
                                           fetcher=brreg.get_company,

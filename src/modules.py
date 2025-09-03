@@ -213,7 +213,8 @@ class BRREGapi(ApiBase):
         if not logger:
             logger = Logger('brregAPI','a')
         self.logger = logger
-        self.exceeds_limit = {}
+        self.exceeds_limit = {"postnummer":{},
+                              "kommunenummer" : {}}
         self.bq = BigQuery(logger = logger)
         self.logger.set_level('INFO')
 
@@ -280,17 +281,23 @@ class BRREGapi(ApiBase):
             'accept': 'application/json'
         }
         #self.logger.info(f'Getting companies from municipality {municipality_code}')
-        response = await self.fetch_single(url = url, params = params, headers = headers)
-        if response:
-            total_elements = response.get("page").get("totalElements")
-            self.logger.info(f'Getting data from municipality {municipality_code} with total elements: {total_elements}')
-            if total_elements>10000:
-                self.logger.warning(f'Total elements is {total_elements} for municipality {municipality_code}, which exceeds the limit.')
-                self.exceeds_limit[municipality_code] = total_elements
-                return None
+        try:
+            response = await self.fetch_single(url = url, params = params, headers = headers,timeout = 90)
+            if response:
+                total_elements = response.get("page").get("totalElements")
+                self.logger.debug(f'Getting data from municipality {municipality_code} with total elements: {total_elements}')
+                if total_elements>10000:
+                    exceded_dict =self.exceeds_limit.get("kommunenummer")
+                    self.logger.warning(f'Total elements is {total_elements} for municipality {municipality_code}, which exceeds the limit.\nAdds to {exceded_dict}')
+                    self.exceeds_limit.get("kommunenummer")[municipality_code] = total_elements
+
+
+                    return None
+                else:
+                    return response
             else:
-                return response
-        else:
+                self.logger.warning(f'Return object is None for municipality {municipality_code}')
+        except NotFoundError:
             self.logger.warning(f'No data found for municipality {municipality_code}')
 
     async def get_page_by_postal_code(self,postal_code):
@@ -305,29 +312,38 @@ class BRREGapi(ApiBase):
             'accept': 'application/json'
         }
         #self.logger.info(f'Getting companies from municipality {municipality_code}')
-        response = await self.fetch_single(url = url, params = params, headers = headers)
-        if response:
-            total_elements = response.get("page").get("totalElements")
-            self.logger.info(f'Getting data from municipality {postal_code} with total elements: {total_elements}')
-            if total_elements>10000:
-                self.logger.error(f'Total elements is {total_elements} for postal_code {postal_code}, which exceeds the limit.')
-                self.exceeds_limit[postal_code] = total_elements
-                return None
+        try:
+            response = await self.fetch_single(url = url, params = params, headers = headers,timeout = 90)
+            if response:
+                total_elements = response.get("page").get("totalElements")
+                self.logger.debug(f'Getting data from municipality {postal_code} with total elements: {total_elements}')
+                if total_elements>10000:
+                    self.logger.error(f'Total elements is {total_elements} for postal_code {postal_code}, which exceeds the limit.\nAdding it to {self.exceeds_limit.get("kommunenummer")}')
+                    self.exceeds_limit.get("postnummer")[postal_code] = total_elements
+                    return None
+                else:
+                    return response
             else:
-                return response
-        else:
+                self.logger.warning(f'Return object is None {postal_code}')
+        except NotFoundError:
             self.logger.warning(f'No data found for municipality {postal_code}')
+
 
     def transform_pages(self,items):
 
         def transform_single(item):
-            data = item.get("_embedded",{}).get("enheter")
-            if data:
-                self.ok_responses += 1
-                df = pd.json_normalize(data)
-                self._ensure_fieldnames(df)
-                df["fetch_date"] = pd.Timestamp.now()
-                return df
+            if item:
+                data = item.get("_embedded",{}).get("enheter")
+                if data:
+                    self.ok_responses += 1
+                    df = pd.json_normalize(data)
+                    self._ensure_fieldnames(df)
+                    df["fetch_date"] = pd.Timestamp.now()
+                    return df
+                else:
+                    self.fail_responses += 1
+                    self.logger.warning(f'No data found: {item}')
+                    return None
             else:
                 self.fail_responses += 1
                 self.logger.warning(f'No data found: {item}')
