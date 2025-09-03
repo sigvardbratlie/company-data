@@ -25,7 +25,7 @@ group_type.add_argument("-f","--fill",action = "store_true", help = "")
 
 parser.add_argument("-a", "--all",action = "store_true", help = "")
 
-args = parser.parse_args()
+
 
 
 
@@ -33,42 +33,132 @@ args = parser.parse_args()
 
 if __name__ == "__main__":
     async def main():
+        args = parser.parse_args()
         brreg = BRREGapi()
         try:
             if args.companies:
                 if args.update and args.all:
-                    knr = brreg.bq.read_bq("SELECT DISTINCT kommunenummer FROM brreg.geo_norge")
-                    knr_list = knr.kommunenummer.tolist()
-                    await brreg.get_items(inputs=knr_list,
-                                                fetcher=brreg.get_page_by_municipality,
+                    async def get_all_companies(brreg):
+                        query = """
+                                SELECT code \
+                                FROM brreg.nace_codes
+                                WHERE code LIKE '%.%' \
+                                """
+                        nace = brreg.bq.read_bq(query)
+                        nace_list = nace.code.tolist()
+                        if len(nace_list)>0:
+                            await brreg.get_items(inputs=nace_list,
+                                                  fetcher=brreg.get_nace,
+                                                  transformer=brreg.transform_pages,
+                                                  saver=brreg.save_pages,
+                                                  concurrent_requests=15,
+                                                  save_interval=1000
+                                                  )
+                        knr = brreg.bq.read_bq("SELECT DISTINCT kommunenummer FROM brreg.geo_norge WHERE LOWER(kommunenavn) != 'oslo' ")
+                        knr_list = knr.kommunenummer.tolist()
+                        args_knr = [("00.000",knr) for knr in knr_list]
+                        await brreg.get_items(inputs=args_knr,
+                                                fetcher=brreg.get_nace_municipality,
                                                 transformer=brreg.transform_pages,
                                                 saver=brreg.save_pages,
                                                 concurrent_requests=15,
-                                                save_interval=150
+                                                save_interval=5000
                                                 )
 
-                    with open("exceeds_limit.json", "r") as f:
-                        data = json.load(f)
-                        if data:
-                            kommunenummer = data.get("kommunenummer",{})
-                    if kommunenummer:
-                        postnr = brreg.bq.read_bq(f"SELECT postnummer FROM brreg.geo_norge WHERE kommunenummer IN {tuple(kommunenummer.keys())}")
-                        postnr_list = postnr.postnummer.tolist()
-                        await brreg.get_items(inputs=postnr_list,
-                                                    fetcher=brreg.get_page_by_postal_code,
-                                                    transformer=brreg.transform_pages,
-                                                    saver=brreg.save_pages,
-                                                    concurrent_requests=15,
-                                                    save_interval=500
-                                                    )
-                elif args.org_nr:
-                    await brreg.get_items(inputs=list(args.org_nr),
-                                          fetcher=brreg.get_company,
-                                          #transformer=brreg.transform_pages,
-                                          #saver=brreg.save_pages,
-                                          concurrent_requests=15,
-                                          save_interval=100
-                                          )
+                        args_oslo = [(nace,"0301") for nace in nace_list]
+                        await brreg.get_items(inputs=args_oslo,
+                                              fetcher=brreg.get_nace_municipality,
+                                              transformer=brreg.transform_pages,
+                                              saver=brreg.save_pages,
+                                              concurrent_requests=15,
+                                              save_interval=5000
+                                              )
+
+
+                        pnr = brreg.bq.read_bq("SELECT DISTINCT postnummer FROM brreg.geo_norge WHERE LOWER(kommunenavn) = 'oslo' ")
+                        pnr_list = pnr.postnummer.tolist()
+                        args_pnr = [("00.000",pnr) for pnr in pnr_list]
+                        await brreg.get_items(inputs=args_pnr,
+                                              fetcher=brreg.get_nace_postal,
+                                              transformer=brreg.transform_pages,
+                                              saver=brreg.save_pages,
+                                              concurrent_requests=15,
+                                              save_interval=1000
+                                              )
+
+
+
+                        ## ==== FETCH BY founding date ==========
+                        # with open("exceeds_limit.json", "r") as f:
+                        #     data = json.load(f)
+                        #     if data:
+                        #         nace = data.get("nace", {})
+                        #         if nace:
+                        #             args = []
+                        #             for code in nace:
+                        #                 args.append((code, "fra"))
+                        #                 args.append((code, "til"))
+                        #             await brreg.get_items(inputs=args,
+                        #                                   fetcher=brreg.get_nace_date,
+                        #                                   transformer=brreg.transform_pages,
+                        #                                   saver=brreg.save_pages,
+                        #                                   concurrent_requests=15,
+                        #                                   save_interval=500
+                        #                                   )
+
+                        # ========= FETCH BY MUNICIPALITY AND NACE =========
+                        # with open("exceeds_limit.json", "r") as f:
+                        #     data = json.load(f)
+                        #     if data:
+                        #         nace = data.get("nace", {})
+                        # knr = brreg.bq.read_bq("SELECT DISTINCT kommunenummer FROM brreg.geo_norge")
+                        # knr_list = knr.kommunenummer.tolist()
+                        # args = []
+                        # for code in nace:
+                        #     for knr in knr_list:
+                        #         args.append((code, knr))
+                        # await brreg.get_items(inputs=args,
+                        #                       fetcher=brreg.get_nace_municipality,
+                        #                       transformer=brreg.transform_pages,
+                        #                       saver=brreg.save_pages,
+                        #                       concurrent_requests=15,
+                        #                       save_interval=5000
+                        #                       )
+
+                    await get_all_companies(brreg)
+
+                    # knr = brreg.bq.read_bq("SELECT DISTINCT kommunenummer FROM brreg.geo_norge")
+                    # knr_list = knr.kommunenummer.tolist()
+                    # await brreg.get_items(inputs=knr_list,
+                    #                             fetcher=brreg.get_page_by_municipality,
+                    #                             transformer=brreg.transform_pages,
+                    #                             saver=brreg.save_pages,
+                    #                             concurrent_requests=15,
+                    #                             save_interval=150
+                    #                             )
+                    #
+                    # with open("exceeds_limit.json", "r") as f:
+                    #     data = json.load(f)
+                    #     if data:
+                    #         kommunenummer = data.get("kommunenummer",{})
+                    # if kommunenummer:
+                    #     postnr = brreg.bq.read_bq(f"SELECT postnummer FROM brreg.geo_norge WHERE kommunenummer IN {tuple(kommunenummer.keys())}")
+                    #     postnr_list = postnr.postnummer.tolist()
+                    #     await brreg.get_items(inputs=postnr_list,
+                    #                                 fetcher=brreg.get_page_by_postal_code,
+                    #                                 transformer=brreg.transform_pages,
+                    #                                 saver=brreg.save_pages,
+                    #                                 concurrent_requests=15,
+                    #                                 save_interval=500
+                    #                                 )
+            elif args.org_nr:
+                await brreg.get_items(inputs=list(args.org_nr),
+                                      fetcher=brreg.get_company,
+                                      #transformer=brreg.transform_pages,
+                                      #saver=brreg.save_pages,
+                                      concurrent_requests=15,
+                                      save_interval=100
+                                      )
 
             if args.roles:
                 if args.update or args.fill:
