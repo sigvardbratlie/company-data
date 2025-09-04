@@ -151,16 +151,16 @@ if __name__ == "__main__":
                     #                                 concurrent_requests=15,
                     #                                 save_interval=500
                     #                                 )
-            elif args.org_nr:
-                await brreg.get_items(inputs=list(args.org_nr),
-                                      fetcher=brreg.get_company,
-                                      #transformer=brreg.transform_pages,
-                                      #saver=brreg.save_pages,
-                                      concurrent_requests=15,
-                                      save_interval=100
-                                      )
+                elif args.org_nr:
+                    await brreg.get_items(inputs=list(args.org_nr),
+                                          fetcher=brreg.get_company,
+                                          #transformer=brreg.transform_pages,
+                                          #saver=brreg.save_pages,
+                                          concurrent_requests=15,
+                                          save_interval=100
+                                          )
 
-            if args.roles:
+            elif args.roles:
                 if args.update or args.fill:
                     if args.update:
                         query = """
@@ -193,6 +193,52 @@ if __name__ == "__main__":
                                                    saver=brreg.save_roles,
                                                    concurrent_requests=30,
                                                    save_interval=50000)
+
+            elif args.financial:
+                if args.update:
+                    if args.all:
+                        query = """SELECT organisasjonsnummer 
+                                    FROM brreg.financial
+                                    WHERE DATE_DIFF(TIMESTAMP(CURRENT_DATE()), fetch_date, DAY) >30"""
+                        org_nr = brreg.bq.read_bq(query)
+                        orgnr_list = org_nr.organisasjonsnummer.tolist()
+                        await brreg.get_items_with_ids(inputs=orgnr_list,
+                                            fetcher=brreg.get_financial,
+                                              transformer=brreg.transformer,
+                                              saver = brreg.saver,
+                                              concurrent_requests=15,
+                                              save_interval=5000,
+                                              )
+                    elif args.org_nr:
+                        await brreg.get_items_with_ids(inputs=list(args.org_nr),
+                                              fetcher=brreg.get_financial,
+                                              transformer=brreg.transformer,
+                                              saver=brreg.saver,
+                                              concurrent_requests=15,
+                                              save_interval=5000,
+                                              )
+
+                elif args.fill:
+                    query = """
+                    SELECT organisasjonsnummer 
+                    FROM brreg.companies c
+                    WHERE NOT EXISTS (SELECT 1 FROM brreg.financial f
+                                    WHERE f.organisasjonsnummer = c.organisasjonsnummer)
+                    """
+                    orgnr = brreg.bq.read_bq(query)
+                    orgnr_list = orgnr.organisasjonsnummer.tolist()
+                    await brreg.get_items_with_ids(inputs=orgnr_list,
+                                          fetcher=brreg.get_financial,
+                                          transformer=brreg.transformer,
+                                          saver=brreg.saver,
+                                          concurrent_requests=15,
+                                          save_interval=5000,
+                                          )
+
+
+
+
+
 
         except RateLimitException as e:
             print(f"rate limit exceeded. {e}")

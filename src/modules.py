@@ -79,7 +79,7 @@ class EninApi(ApiBase):
                                                timeout=90)
             return response if response else []
         except NotFoundError:
-            self.logger.error(f'Item {item} not found. Returning None')
+            self.logger.error(f'Item {item} not found. Returning None. 404 error')
             return None
 
 
@@ -251,9 +251,17 @@ class BRREGapi(ApiBase):
             response = await self.fetch_single(url=url,
                                                headers=headers,
                                                return_format='json')
-            return response
+            if response:
+                self.ok_responses += 1
+                return response
+            else:
+                self.fail_responses += 1
+                self.logger.error(f'API returner None.')
+                return None
         except NotFoundError:
-            self.logger.error(f'Item {orgnr} not found. Returning None')
+            self.fail_responses += 1
+            if self.fail_responses % 100 == 0:
+                self.logger.error(f'Item {orgnr} not found. Returning None. 404 Error')
             return None
 
     async def get_role(self,orgnr : int | str,timeout = 60):
@@ -269,7 +277,9 @@ class BRREGapi(ApiBase):
                                                timeout=timeout)
             return response
         except NotFoundError:
-            self.logger.error(f'Item {orgnr} not found. Returning None')
+            self.fail_responses += 1
+            if self.fail_responses % 100 == 0:
+                self.logger.error(f'Item {orgnr} not found. Returning None')
             return None
 
     async def get_nace(self, nace_code):
@@ -390,14 +400,18 @@ class BRREGapi(ApiBase):
                     return None
                 elif total_elements == 0:
                     self.logger.warning(f'Zero elements found for {arg_type} {arg} in api. Returning None')
+                    self.fail_responses += 1
                     return None
                 else:
+                    self.ok_responses += 1
                     return response
             else:
                 self.logger.warning(f'Api returned None for {arg_type} {arg}')
 
         except NotFoundError:
-            self.logger.warning(f'No data found for {arg_type} {arg} - 404 error')
+            self.fail_responses += 1
+            if self.fail_responses % 100 == 0:
+                self.logger.warning(f'No data found for {arg_type} {arg} - 404 error')
             return None
 
     def transform_pages(self,items):
@@ -406,17 +420,17 @@ class BRREGapi(ApiBase):
             if item:
                 data = item.get("_embedded",{}).get("enheter")
                 if data:
-                    self.ok_responses += 1
+                    #self.ok_responses += 1
                     df = pd.json_normalize(data)
                     self._ensure_fieldnames(df)
                     df["fetch_date"] = pd.Timestamp.now()
                     return df
                 else:
-                    self.fail_responses += 1
+                    #self.fail_responses += 1
                     self.logger.warning(f'No data found when transforming {item}')
                     return None
             else:
-                self.fail_responses += 1
+                #self.fail_responses += 1
                 self.logger.warning(f'No data found: {item}')
                 return None
         results = [transform_single(item) for item in items if item is not None]
@@ -430,7 +444,7 @@ class BRREGapi(ApiBase):
             if raw:
                 role_groups = raw.get('rollegrupper', [])
                 if role_groups:
-                    self.ok_responses += 1
+                    #self.ok_responses += 1
                     for group in role_groups:
                         df1 = pd.json_normalize(group['roller'])
                         df1['organisasjonsnummer'] = orgnr
@@ -439,11 +453,11 @@ class BRREGapi(ApiBase):
                     df["fetch_date"] = pd.Timestamp.now()
                     return df
                 else:
-                    self.fail_responses += 1
+                    #self.fail_responses += 1
                     self.logger.warning(f'No role groups found for {orgnr}')
                     return None
             else:
-                self.fail_responses += 1
+                #self.fail_responses += 1
                 self.logger.warning(f'No results from fetcher for {orgnr}')
                 return None
 
@@ -510,8 +524,8 @@ class BRREGapi(ApiBase):
             df.drop_duplicates(subset=merge_on, inplace=True)
             self.logger.info(f'Drop duplicates before merge. Len after drop duplicates {len(df)}')
             self.bq.to_bq(df, table, dataset, if_exists='merge', merge_on=merge_on,explicit_schema=explicit_columns)
-        else:
-            self.bq.to_bq(df, table, dataset, if_exists=if_exists,explicit_schema=explicit_columns)
+        # else:
+        #     self.bq.to_bq(df, table, dataset, if_exists=if_exists,explicit_schema=explicit_columns)
 
     def save_roles(self,df,if_exists : Literal["merge","append","replace"] = "append"):
         table = "roles"
@@ -522,8 +536,47 @@ class BRREGapi(ApiBase):
             df.drop_duplicates(subset=merge_on, inplace=True)
             self.logger.info(f'Drop duplicates before merge. Len after drop duplicates {len(df)}')
             self.bq.to_bq(df, table, dataset, if_exists='merge', merge_on=merge_on,explicit_schema={"fetch_date" : "DATETIME"})
+        # else:
+        #     self.bq.to_bq(df, table, dataset, if_exists=if_exists)
+
+    def transformer(self,items):
+        def transform_single(item):
+            org_nr,data = item
+            if data:
+                #self.ok_responses += 1
+                df = pd.json_normalize(data)
+            else:
+                #self.fail_responses += 1
+                df = pd.DataFrame()
+            df["organisasjonsnummer"] = org_nr
+            return df
+
+        results = [transform_single(item) for item in items if item is not None]
+        df = pd.concat(results, ignore_index=True)
+        self._ensure_fieldnames(df)
+        if not df.empty and df is not None:
+            return df
         else:
-            self.bq.to_bq(df, table, dataset, if_exists=if_exists)
+            self.logger.warning(f'No data found in transform! Items {items[:5]}...')
+
+
+    def saver(self,df,if_exists : Literal["merge","append","replace"] = "merge"):
+
+        merge_on = ["virksomhet_organisasjonsnummer","regnskapsperiode_fraDato","regnskapsperiode_tilDato"]
+        df.drop_duplicates(subset = merge_on, inplace=True)
+
+        if if_exists == "merge":
+            self.bq.to_bq(df = df,
+                          table_name = "financial",
+                          dataset_name = "brreg",
+                          if_exists = if_exists,
+                          merge_on = merge_on)
+        # else:
+        #     self.bq.to_bq(df=df,
+        #                   table_name="financial",
+        #                   dataset_name="brreg",
+        #                   if_exists=if_exists)
+
 
     # async def get_by_nace_geo(self,
     #                           nace_codes : list = None,
